@@ -1,0 +1,470 @@
+---
+title: "MODELO PARA LA PENDIENTE (m) DEL CONSUMO DE ACIDO"
+author: ""
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: united
+    toc: yes
+  word_document:
+    toc: yes
+  pdf_document:
+    highlight: zenburn
+    toc: yes
+always_allow_html: true
+---
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+#Configuración de opciones generales
+knitr::opts_chunk$set(
+	error = FALSE,
+	fig.align = "center",
+	message = FALSE,
+	warning = FALSE,
+	comment = "",
+	echo    = FALSE, #TRUE muestra el codigo
+	fig.height=12, 
+	fig.width=15
+)
+```
+
+
+
+```{r librerias}
+library(tidyverse)
+library(tidymodels)
+library(lubridate)
+library(readxl)
+library(ggcorrplot)
+library(inspectdf)
+library(lares)
+library(tidyquant)
+library(glmnet)
+library(DT)
+
+```
+
+```{r funcion corrplot2}
+
+corrplot2 <- function(data,
+                      method = "pearson",
+                      sig.level = 0.05,
+                      order = "original",
+                      diag = FALSE,
+                      type = "upper",
+                      tl.srt = 90,
+                      number.font = 1,
+                      number.cex = 1,
+                      mar = c(0, 0, 0, 0)) {
+  library(corrplot)
+  data_incomplete <- data
+  data <- data[complete.cases(data), ]
+  mat <- cor(data, method = method)
+  cor.mtest <- function(mat, method) {
+    mat <- as.matrix(mat)
+    n <- ncol(mat)
+    p.mat <- matrix(NA, n, n)
+    diag(p.mat) <- 0
+    for (i in 1:(n - 1)) {
+      for (j in (i + 1):n) {
+        tmp <- cor.test(mat[, i], mat[, j], method = method)
+        p.mat[i, j] <- p.mat[j, i] <- tmp$p.value
+      }
+    }
+    colnames(p.mat) <- rownames(p.mat) <- colnames(mat)
+    p.mat
+  }
+  p.mat <- cor.mtest(data, method = method)
+  col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+  corrplot(mat,
+    method = "color", col = col(200), number.font = number.font,
+    mar = mar, number.cex = number.cex,
+    type = type, order = order,
+    addCoef.col = "black", # add correlation coefficient
+    tl.col = "black", tl.srt = tl.srt, # rotation of text labels
+    # combine with significance level
+    p.mat = p.mat, sig.level = sig.level, insig = "blank",
+    # hide correlation coefficiens on the diagonal
+    diag = diag
+  )
+}
+
+```
+
+## OBJETIVO
+
+El trabajo consistió en modelar la pendiente del modelo fenomenológico de consumo de ácido con diferentes propiedades medibles del mineral, en base a los datos generados en los ensayos de laboratorio realizados en minicolumnas.
+
+
+## INTRODUCCION
+
+Modelo cinético inicial propuesto:
+
+CHN = (A0)x(1-(1-r0)^t) + (A1)x(1-(1-r1)^t) + (A2)x(1-(1-r2)^t)
+
+En donde:
+
+* CHN = Consumo ácido neto [kg/t].
+* A   = máximo consumo de ácido en [kg/t], según la etapa.
+* r   = tasa de consumo de ácido en [kg/t/d] para cada “A”, según su etapa.
+* t   = tiempo de lixiviación en días.
+
+En donde las etapas del proceso son: 0: “curado”, 1: primer drenaje, 2: tiempo infinito. 
+
+Con la siguiente información conocida:
+
+* A0 = ácido en etapa de "curado”, menos 1.54 x CuT x 10 x %CuTSulfatado  [kg/t]
+* A1 = 0
+* A2 = máximo consumo; 200 [kg/t], menos A0
+* r0  = 0.9
+* r1  = 0
+* r2  = velocidad o pendiente m etapa 2, a modelar en base a información de lixiviación en minicolumnas.
+
+
+## ANALISIS DE CORRELACIONES
+
+```{r lectura}
+
+#CHN/CHG <- SHEET =2
+#CHT     <- SHEET =1 
+
+oxi_noNaCl <- read_excel(path = "correlaciones.xlsx", skip = 1, sheet = 2)
+
+
+janitor::clean_names(oxi_noNaCl) %>% 
+    select(-m, -minicolumna) %>% 
+    names() %>% 
+    as.data.frame() %>% 
+    
+    datatable(rownames = TRUE, colnames = c("Variables"=2),
+              caption = htmltools::tags$caption(
+              style = "caption-side:top;text-align: left;font-weight: bold;",
+                      "Variables Analizadas")
+              ) %>% 
+    formatStyle(columns = c(1), textAlign="center")
+
+```
+
+
+### Gráfica de Correlación por Método Pearson
+
+```{r correlacion}
+corr_tbl <- oxi_noNaCl %>% 
+    dplyr::select(- Minicolumna) %>% 
+    inspect_cor(method = "pearson", with_col = "m") %>% 
+    mutate(
+        col_2=col_2 %>% as_factor() %>% fct_rev(),
+        corr_2_txt= corr %>% scales::percent(accuracy = 0.01) 
+        ) 
+    
+corr_tbl %>% 
+    ggplot(aes(x=col_2, y=corr))+
+    geom_col(fill= if_else(condition = corr_tbl$corr>0, true = "#1D9FF9", false = "#E46726"))+
+    geom_text(aes(label=corr_2_txt), hjust="inward", size=5)+
+    coord_flip()+
+    scale_y_continuous(labels = scales::percent, limits = c(-1,1), breaks = seq(-1, 1, by=0.1))+
+    labs(
+      title = "Correlation Plot \nSlope versus all Variables",
+      subtitle = "Pearson Method",
+      x ="Variables",
+      y = "Correlation level",
+      caption = ""
+        )+
+    theme_tq(base_size = 20)+
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1)
+        )
+
+```
+
+### Gráficas de Dispersión Lineal
+
+```{r dispersion}
+
+oxi_noNaCl %>%
+    select(-Minicolumna) %>% 
+    gather(key = "col_2", value = "value", -m) %>% 
+    left_join(x = (corr_tbl %>% select(col_2, corr)), by = "col_2" ) %>% 
+    mutate(col_2=col_2 %>% as_factor()) %>% 
+   
+    ggplot(aes(x=value, y=m))+
+    geom_point(size=2, color="#1D9FF9")+
+    geom_smooth(method = "lm", se=FALSE)+
+    facet_wrap(~col_2, scales = "free")+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.07))+
+    labs(
+      title = "Point Plot \nSlope versus all Variables",
+      subtitle = "Linear Correlations:\nhigher to lower",
+      x ="Value per Var.",
+      y = "Slope (m)",
+      caption = ""
+        )+
+    theme_bw(base_size = 18)+
+    theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position= "none"
+        )
+
+```
+
+## MODELACION
+
+A continuación se presentan diferentes modelos para la pendiente (m) del consumo de ácido neto (CHN/CHG). 
+
+### Modelo en base a Turmalina (SLR) 
+
+```{r}
+#OLS SIMPLE TURMALINA
+
+fit_ols_tur <- lm(m ~ Turmalina_pct, data = oxi_noNaCl)
+coef(fit_ols_tur)
+
+as_tibble(predict(fit_ols_tur, newdata = oxi_noNaCl %>% select(-Minicolumna, -m))) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=value))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_abline(intercept = 0, size=2)+
+    geom_smooth(method = "lm", se=FALSE)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "TURMALINA MODEL (SLR)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+    
+```
+
+### Modelo Regularizado (RIDGE) 
+
+Este modelo considera todas las variables con regularización **RIDGE**, la cual regulariza (contrae hacia cero) los coeficientes de las variables que tienen un menor efecto en la respuesta.
+
+```{r}
+## REGRESION RIDGE
+x <- model.matrix(m~., data = oxi_noNaCl)[, c(-1,-2)]
+y <- oxi_noNaCl$m
+
+#LAMBDA
+set.seed(1)
+cv_error_ridge <- cv.glmnet(x = x, y = y, alpha = 0, nfolds = 10, type.measure = "mse")
+cv_error_ridge$lambda.min  #For parsimony use: lambda.1se
+
+fit_ridge_full <- glmnet(x = x, y = y, alpha = 0, lambda = cv_error_ridge$lambda.min)
+coef(fit_ridge_full )
+
+as_tibble(predict(fit_ridge_full , newx = x)) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=s0))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_abline(intercept = 0, size=2)+
+    geom_smooth(method = "lm", se=FALSE)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "FULL REGULARIZED MODEL (RIDGE Regression)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+    
+
+
+```
+
+### Modelo Regularizado (LASSO) 
+
+Este modelo considera todas las variables con regularización **LASSO**, la cual hace cero los coeficientes de las variables que tienen un menor efecto en la respuesta.
+
+
+```{r}
+## REGRESION LASSO
+x <- model.matrix(m~., data = oxi_noNaCl)[, c(-1,-2)]
+y <- oxi_noNaCl$m
+
+#LAMBDA
+set.seed(1)
+cv_error_lasso <- cv.glmnet(x = x, y = y, alpha = 1, nfolds = 10)
+cv_error_lasso$lambda.1se  #For parsimony use: lambda.1se
+
+fit_lasso_full <- glmnet(x = x, y = y, alpha = 1, lambda = cv_error_lasso$lambda.1se)
+coef(fit_lasso_full)
+
+
+as_tibble(predict(fit_lasso_full, newx = x)) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=s0))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_abline(intercept = 0, size=2)+
+    geom_smooth(method = "lm", se=FALSE)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "FULL REGULARIZED MODEL (LASSO Regression)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+    
+
+
+```
+
+
+### Modelo Corr >40% (MLR) 
+
+En el presente modelo, así como en los que siguen, se consideran las variables cuyo nivel de correlación con la pendiente del CHN es mayor a un 40%. 
+
+
+```{r}
+#OLS MULTIPLE >40% Correlacion
+
+fit_ols_40pct <- lm(m ~ Turmalina_pct + Biotita_pct + CAAg_kgt + Fe3S_pctm + 
+               Plagioclasa_pct   + AlS_pctm, data = oxi_noNaCl)
+coef(fit_ols_40pct)
+
+as_tibble(predict(fit_ols_40pct, newdata = oxi_noNaCl %>% select(-Minicolumna, -m))) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=value))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_smooth(method = "lm", se=FALSE)+
+    geom_abline(intercept = 0, size=2)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "MODEL CORR >40% (MLR)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+
+```
+
+
+### Modelo Corr >40% Testeo (MLR) 
+
+Este modelo se basa en variables cuya correlación con m es mayor a 40%, y que además, tienen la característica de tener un fácil testeo en laboratorio.
+
+
+```{r}
+#OLS MULTIPLE FACIL TESTEO
+
+fit_ols_40pct_test <- lm(m ~ CAAg_kgt + Fe3S_pctm + AlS_pctm, data = oxi_noNaCl)
+coef(fit_ols_40pct_test)
+
+as_tibble(predict(fit_ols_40pct_test, newdata = oxi_noNaCl %>% select(-Minicolumna, -m))) %>%     bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=value))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_smooth(method = "lm", se=FALSE)+
+    geom_abline(intercept = 0, size=2)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "MODEL CORR >40% TEST (MLR)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+
+```
+
+
+### Modelo Corr >40% Testeo (RIDGE)
+
+Este modelo se basa en variables regularizadas por método **RIDGE** cuya correlación con la pendiente m del CHN es mayor a un 40%, y que además, tienen la característica de tener un fácil testeo en laboratorio. 
+
+
+```{r}
+## REGRESION Corr>40% Testeo RIDGE
+x <- model.matrix(m~., data = oxi_noNaCl %>% dplyr::select(m, CAAg_kgt, 
+                                                    Fe3S_pctm, AlS_pctm))[,-1]
+y <- oxi_noNaCl$m
+
+#LAMBDA
+set.seed(1)
+cv_error_ridge <- cv.glmnet(x = x, y = y, alpha = 0, nfolds = 10, type.measure = "mse")
+cv_error_ridge$lambda.min  #For parsimony use: lambda.1se
+
+fit_ridge_40pct_test <- glmnet(x = x, y = y, alpha = 0, lambda = cv_error_ridge$lambda.min)
+coef(fit_ridge_40pct_test)
+
+as_tibble(predict(fit_ridge_40pct_test, newx = x)) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=s0))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_abline(intercept = 0, size=2)+
+    geom_smooth(method = "lm", se=FALSE)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "MODEL CORR >40% TEST (RIDGE Regression)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+
+
+```
+
+
+### Modelo Corr >40% Testeo (LASSO) 
+
+Este modelo se basa en variables regularizadas por método **LASSO** cuya correlación con la pendiente m del CHN es mayor a un 40%, y que además, tienen la característica de tener un fácil testeo en laboratorio. 
+
+
+```{r}
+# REGRESION Corr>40% Testeo LASSO
+x <- model.matrix(m~., data = oxi_noNaCl %>% dplyr::select(m, CAAg_kgt, 
+                                                    Fe3S_pctm, AlS_pctm))[,-1]
+y <- oxi_noNaCl$m
+
+#LAMBDA
+set.seed(1)
+cv_error_lasso <- cv.glmnet(x = x, y = y, alpha = 1, nfolds = 10, type.measure = "mse")
+cv_error_lasso$lambda.min  #For parsimony use: lambda.1se
+
+fit_lasso_40pct_test <- glmnet(x = x, y = y, alpha = 1, lambda = cv_error_lasso$lambda.min)
+coef(fit_lasso_40pct_test)
+
+as_tibble(predict(fit_lasso_40pct_test, newx = x)) %>% 
+    bind_cols(oxi_noNaCl %>% select(m)) %>% 
+    ggplot(aes(x=m, y=s0))+
+    geom_point(size=5, color="#1D9FF9")+
+    geom_abline(intercept = 0, size=2)+
+    geom_smooth(method = "lm", se=FALSE)+
+    theme_bw(base_size = 20)+    
+    scale_x_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    scale_y_continuous(limits = c(0.65,1), breaks = seq(0.65, 1, by=0.05))+
+    labs(
+      title = "MODEL CORR >40% TEST (LASSO Regression)",
+      subtitle = "Modeling vs Experimental",
+      x ="m experimental",
+      y = "m model",
+      caption = ""
+        )
+
+```
+
+
+
+
+
+
+
+
